@@ -44,7 +44,7 @@ bool CustomSkull::load() {
         }
     }
     mConfig.useServerAnchor = false;
-    mConfig.useHologramLib = true;
+    mConfig.useHologramLib = false;
     mConfig.keepSkinListed = true;
     logger.setLevel(mConfig.debug ? ll::io::LogLevel::Debug : ll::io::LogLevel::Warn);
 
@@ -89,6 +89,7 @@ bool CustomSkull::enable() {
     if (mEntities) {
         mEntities->registerEvents();
         mEntities->startTabCleanup();
+        mEntities->startTicking();
     }
     if (auto& bridge = HologramBridge::getInstance(); bridge.initialize()) {
         logger.info("HologramLib player-NPC bridge enabled");
@@ -119,31 +120,18 @@ bool CustomSkull::unload() {
 }
 
 void CustomSkull::broadcastSkin(SkinRecord const& record, SkinImage const& image) {
-    std::vector<SkinPayload> payloads;
-    payloads.push_back({record, image});
-    sendSkinPayloads(payloads, nullptr, mConfig.maxEntriesPerPacket, mConfig.keepSkinListed);
+    (void)record;
+    (void)image;
+    return;
 }
 
 void CustomSkull::broadcastAllSkins() {
-    std::vector<SkinPayload> payloads;
-    payloads.reserve(mStore->all().size());
-    for (auto const& record : mStore->all()) {
-        if (auto image = mStore->image(record)) {
-            payloads.push_back({record, std::move(*image)});
-        }
-    }
-    sendSkinPayloads(payloads, nullptr, mConfig.maxEntriesPerPacket, mConfig.keepSkinListed);
+    return;
 }
 
 void CustomSkull::sendAllSkins(Player& player) {
-    std::vector<SkinPayload> payloads;
-    payloads.reserve(mStore->all().size());
-    for (auto const& record : mStore->all()) {
-        if (auto image = mStore->image(record)) {
-            payloads.push_back({record, std::move(*image)});
-        }
-    }
-    sendSkinPayloads(payloads, &player, mConfig.maxEntriesPerPacket, mConfig.keepSkinListed);
+    (void)player;
+    return;
 }
 
 void CustomSkull::onPlayerJoin(Player& player) {
@@ -166,4 +154,5 @@ void CustomSkull::onPlayerJoin(Player& player) {
 } // namespace custom_skull
 
 LL_REGISTER_MOD(custom_skull::CustomSkull, custom_skull::CustomSkull::getInstance())
+
 

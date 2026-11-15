@@ -1,4 +1,4 @@
-﻿#include "mod/CustomSkull.h"
+#include "mod/CustomSkull.h"
 
 #include <algorithm>
 #include <cctype>
@@ -15,6 +15,7 @@
 #include "mc/server/commands/CommandOrigin.h"
 #include "mc/server/commands/CommandOutput.h"
 #include "mc/server/commands/CommandPermissionLevel.h"
+#include "mc/server/commands/CommandSelector.h"
 #include "mc/world/actor/player/Player.h"
 #include "mc/world/item/SaveContext.h"
 #include "mc/world/level/BlockSource.h"
@@ -32,8 +33,8 @@
 namespace custom_skull {
 
 struct GetParams {
-    std::string name;
-    int         count = 1;
+    CommandSelector<Player> target;
+    int                     count = 1;
 };
 
 struct JavaParams {
@@ -105,7 +106,7 @@ void registerSkullCommand(CustomSkull& mod) {
 
     command.overload<GetParams>()
         .text("get")
-        .required("name")
+        .required("target")
         .optional("count")
         .execute([](CommandOrigin const& origin, CommandOutput& output, GetParams const& params) {
             auto& mod   = CustomSkull::getInstance();
@@ -114,9 +115,14 @@ void registerSkullCommand(CustomSkull& mod) {
                 output.error("The server level is not ready");
                 return;
             }
-            Player* target = level->getPlayer(params.name);
+            auto targets = params.target.results(origin);
+            if (targets.empty()) {
+                output.error("No matching online player");
+                return;
+            }
+            Player* target = *targets.begin();
             if (!target) {
-                output.error("Online Bedrock player not found: {}", params.name);
+                output.error("No matching online player");
                 return;
             }
             auto image = imageFromPlayer(*target);
@@ -125,7 +131,7 @@ void registerSkullCommand(CustomSkull& mod) {
                 return;
             }
             std::string error;
-            auto        record = mod.store().upsert(params.name, "bedrock", *image, error);
+            auto        record = mod.store().upsert(target->getRealName(), "bedrock", *image, error);
             if (record.uuid.empty()) {
                 output.error("Could not save the skin: {}", error);
                 return;
@@ -168,12 +174,16 @@ void registerSkullCommand(CustomSkull& mod) {
                     [&mod, name, count, requesterUuid, result = std::move(result), error]() mutable {
                         auto level = ll::service::getLevel();
                         if (!result) {
+                            std::string message = error;
+                            if (message.find("429") != std::string::npos) {
+                                message += " (Mojang rate limited, please wait a few minutes and retry)";
+                            }
                             if (level) {
                                 if (auto* player = level->getPlayer(requesterUuid)) {
-                                    player->sendMessage("CustomSkull: " + error);
+                                    player->sendMessage("CustomSkull: " + message);
                                 }
                             }
-                            mod.getSelf().getLogger().warn("Java skin fetch failed for {}: {}", name, error);
+                            mod.getSelf().getLogger().warn("Java skin fetch failed for {}: {}", name, message);
                             return;
                         }
                         std::string saveError;
@@ -260,6 +270,12 @@ void registerSkullCommand(CustomSkull& mod) {
                             continue;
                         }
                         ++found;
+                        output.success(
+                            "[blockinfo] pos={} type={} data={}",
+                            pos.toString(),
+                            block.getTypeName(),
+                            block.getData()
+                        );
                         auto* actor = region.getBlockEntity(pos);
                         mod.logger().info(
                             "[skull] blockinfo pos={} data={} actor={}",
@@ -273,11 +289,13 @@ void registerSkullCommand(CustomSkull& mod) {
                         if (actor->getType() == BlockActorType::Skull) {
                             auto* skullActor = static_cast<SkullBlockActor*>(actor);
                             mod.logger().info("[skull] blockinfo rotation={}", skullActor->mRotation);
+                            output.success("[blockinfo] rotation={}", skullActor->mRotation);
                         }
                         CompoundTag tag;
                         SaveContext context{SaveContext::SaveUseCase::BlockActorToItemUserData};
                         actor->save(tag, context);
                         mod.logger().info("[skull] blockinfo nbt={}", tag.toString());
+                        output.success("[blockinfo] nbt={}", tag.toString());
                     }
                 }
             }
