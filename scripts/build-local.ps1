@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 # Local, offline build helper for this development machine.
 # The normal build path is `xmake`; this script only exists because the
 # development sandbox has no access to GitHub for xmake repositories.
@@ -102,8 +102,13 @@ if ($LASTEXITCODE -ne 0) { throw "link failed" }
 $package = Join-Path $root "bin\CustomSkull"
 New-Item -ItemType Directory -Force $package | Out-Null
 Copy-Item $outDll (Join-Path $package "CustomSkull.dll") -Force
-(Get-Content (Join-Path $root "manifest.json") -Raw).Replace('${modVersion}', '26.60.0') |
-    Set-Content (Join-Path $package "manifest.json") -Encoding utf8
+$manifest = (Get-Content (Join-Path $root "manifest.json") -Raw).Replace('${modVersion}', '26.60.1')
+[IO.File]::WriteAllText(
+    (Join-Path $package "manifest.json"),
+    $manifest,
+    (New-Object Text.UTF8Encoding($false))
+)
 Write-Host "built $package"
+
 
 

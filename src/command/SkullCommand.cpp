@@ -1,4 +1,4 @@
-#include "mod/CustomSkull.h"
+﻿#include "mod/CustomSkull.h"
 
 #include <algorithm>
 #include <cctype>
@@ -353,6 +353,7 @@ void registerSkullCommand(CustomSkull& mod) {
 }
 
 } // namespace custom_skull
+
 
 
 
