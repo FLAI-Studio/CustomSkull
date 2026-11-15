@@ -52,6 +52,7 @@ private:
         int         z = 0;
         std::string ownerUuid;
         std::string entityUuid;
+        std::vector<std::string> retiredEntityUuids;
         int64_t     uniqueId  = 0;
         uint64_t    runtimeId = 0;
         int64_t     hologramId = -1;
@@ -100,6 +101,7 @@ private:
     std::map<std::array<int, 3>, FakeSkull>                    mPlaced;
     std::unordered_map<std::string, std::string>               mPendingOwner;
     std::unordered_map<std::string, Player*>                   mPendingPlayer;
+    std::unordered_map<std::string, bool>                      mNearState;
     std::deque<std::pair<std::string, std::string>>             mGiveQueue;
     std::vector<std::shared_ptr<ll::event::ListenerBase>>      mListeners;
     std::filesystem::path                                      mPersistencePath;

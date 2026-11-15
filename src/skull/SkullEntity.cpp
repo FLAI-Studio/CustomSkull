@@ -149,20 +149,17 @@ std::optional<WallSkullInfo> wallSkullInfo(BlockSource& source, BlockPos const& 
     // nibble (2..5); floor heads use the entity rotation instead.
     int data = block.getData();
     if (data >= 2 && data <= 5) {
-        BlockPos below{pos.x, pos.y - 1, pos.z};
-        if (source.getBlock(below).getTypeName() == "minecraft:air") {
-            switch (data) {
-            case 2:
-                return WallSkullInfo{180.0f, 0.0f, 0.25f, 0.23f};
-            case 3:
-                return WallSkullInfo{0.0f, 0.0f, 0.25f, -0.23f};
-            case 4:
-                return WallSkullInfo{90.0f, 0.23f, 0.25f, 0.0f};
-            case 5:
-                return WallSkullInfo{270.0f, -0.23f, 0.25f, 0.0f};
-            default:
-                break;
-            }
+        switch (data) {
+        case 2:
+            return WallSkullInfo{180.0f, 0.0f, 0.25f, 0.23f};
+        case 3:
+            return WallSkullInfo{0.0f, 0.0f, 0.25f, -0.23f};
+        case 4:
+            return WallSkullInfo{90.0f, 0.23f, 0.25f, 0.0f};
+        case 5:
+            return WallSkullInfo{270.0f, -0.23f, 0.25f, 0.0f};
+        default:
+            break;
         }
     }
     return std::nullopt;
@@ -659,19 +656,11 @@ void SkullEntityManager::cleanTabEntries() {
         entries.emplace_back(std::move(key), uuid);
     };
 
-    for (auto const& [key, skull] : mPlaced) {
-        if (skull.hologramId >= 0) {
-            add(mce::UUID(0xF0B34E5043000000ULL, static_cast<uint64>(skull.hologramId)));
-        }
-        if (!skull.entityUuid.empty()) {
-            add(parseUuid(skull.entityUuid));
-        }
-    }
     for (auto const& record : mStore.all()) {
+        add(parseUuid(record.uuid));
         add(parseUuid(entityUuidFor(record.uuid)));
     }
     for (uint64 i = 1; i <= 64; ++i) {
-        add(mce::UUID(0x534B554C4C000000ULL, i));
         add(mce::UUID(0xF0B34E5043000000ULL, i));
     }
     if (entries.empty()) {
@@ -725,6 +714,7 @@ void SkullEntityManager::tick() {
         }
     } else {
         level->forEachPlayer([&](Player& player) {
+            auto playerKey = uuidToString(player.getUuid());
             for (auto const& [key, skull] : mPlaced) {
                 if (skull.dimension != static_cast<int>(player.getDimensionId())) {
                     continue;
@@ -734,18 +724,48 @@ void SkullEntityManager::tick() {
                     static_cast<float>(skull.y),
                     static_cast<float>(skull.z) + 0.5f + skull.zOffset
                 };
-                if ((player.getPosition() - position).length() > 96.0f) {
+                bool near = (player.getPosition() - position).length() <= 512.0f;
+                auto stateKey = std::format(
+                    "{}|{}, {}, {}",
+                    playerKey,
+                    skull.x,
+                    skull.y,
+                    skull.z
+                );
+                auto stateIt = mNearState.find(stateKey);
+                if (stateIt == mNearState.end()) {
+                    mNearState.emplace(std::move(stateKey), near);
                     continue;
                 }
-                auto* record = mStore.findByUuid(skull.ownerUuid);
-                if (!record) {
-                    continue;
+                if (!stateIt->second && near) {
+                    auto* record = mStore.findByUuid(skull.ownerUuid);
+                    if (!record) {
+                        continue;
+                    }
+                    auto image = mStore.image(*record);
+                    if (!image) {
+                        continue;
+                    }
+                    static std::atomic<uint64_t> recreateCounter{0x100000};
+                    auto const                   token  = recreateCounter.fetch_add(1);
+                    auto&                        mutableSkull = mPlaced[key];
+                    mutableSkull.retiredEntityUuids.push_back(mutableSkull.entityUuid);
+                    if (mutableSkull.retiredEntityUuids.size() > 8) {
+                        mutableSkull.retiredEntityUuids.erase(mutableSkull.retiredEntityUuids.begin());
+                    }
+                    mutableSkull.entityUuid = uuidToString(mce::UUID(0x534B554C4C000000ULL, token));
+                    mutableSkull.uniqueId   = uniqueIdFor(mutableSkull.entityUuid);
+                    mutableSkull.runtimeId  = static_cast<uint64_t>(mutableSkull.uniqueId);
+                    spawn(mutableSkull, *record, *image, player, &player, false);
+                    CustomSkull::getInstance().logger().info(
+                        "[skull] client re-entered view, recreated entity for {} at ({},{},{})",
+                        player.getRealName(),
+                        skull.x,
+                        skull.y,
+                        skull.z
+                    );
                 }
-                auto image = mStore.image(*record);
-                if (!image) {
-                    continue;
-                }
-                spawn(skull, *record, *image, player, &player, true);
+                stateIt->second = near;
             }
             return true;
         });
@@ -1211,7 +1231,7 @@ void SkullEntityManager::onJoin(Player& player) {
             continue;
         }
         if (auto image = mStore.image(*record)) {
-            sendSkullTo(skull, *record, *image, &player);
+            spawn(skull, *record, *image, player, &player, false);
         }
     }
 }
@@ -1293,7 +1313,7 @@ void SkullEntityManager::spawn(
         auto tabUuid = parseUuid(skull.entityUuid);
         ll::thread::ServerThreadExecutor::getDefault().executeAfter(
             [this, tabUuid]() { removeTabEntry(tabUuid); },
-            std::chrono::milliseconds(1000)
+            std::chrono::seconds(2)
         );
     }
 }
@@ -1315,13 +1335,23 @@ void SkullEntityManager::remove(FakeSkull const& skull, Player const* target) {
         }
         return;
     }
-    RemoveActorPacket packet;
-    packet.mSerializationMode = SerializationMode::CerealOnly;
-    packet.mEntityId          = ActorUniqueID{skull.uniqueId};
-    if (target) {
-        packet.sendTo(*target);
-    } else {
-        packet.sendToClients();
+    auto removeOne = [&](std::string const& uuid) {
+        if (uuid.empty()) {
+            return;
+        }
+        RemoveActorPacket packet;
+        packet.mSerializationMode = SerializationMode::CerealOnly;
+        packet.mEntityId          = ActorUniqueID{uniqueIdFor(uuid)};
+        if (target) {
+            packet.sendTo(*target);
+        } else {
+            packet.sendToClients();
+        }
+        removeTabEntry(parseUuid(uuid));
+    };
+    removeOne(skull.entityUuid);
+    for (auto const& retired : skull.retiredEntityUuids) {
+        removeOne(retired);
     }
 }
 
