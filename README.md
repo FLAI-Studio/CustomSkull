@@ -138,18 +138,6 @@ mods/CustomSkull/
 
 要修复需要在 HologramLib 层处理玩家 NPC 的垂直偏移，或实现安全的客户端区块重载。欢迎 PR。
 
-### 客户端玩家列表残留 `Skull-*`
-
-HologramLib 创建玩家 NPC 时会向客户端发送 `PlayerListPacket`，但这些伪玩家只存在于客户端，服务端目标选择器不存在它们。
-
-HologramLib 的 `processTabRemovals` 不会真正发送 Remove 包，因此客户端玩家列表会残留：
-
-- `Skull-<uuid>`
-
-已尝试用 BDS `PlayerListPacket Remove` 清理，但未生效。
-
-该问题不影响真实在线玩家数量、实际头颅显示和服务器逻辑。
-
 ### Java API 限流
 
 `/skull java` 使用 Mojang 公共 API，小概率可能返回 HTTP 429。请等待一段时间后重试。
