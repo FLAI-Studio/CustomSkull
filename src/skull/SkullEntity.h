@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "ll/api/event/Listener.h"
+#include "mc/platform/UUID.h"
 
 #include "skull/Types.h"
 
@@ -34,10 +35,11 @@ public:
     void registerEvents();
     void unregisterEvents();
     void startTicking();
+    void startTabCleanup();
 
     void sendAll(Player& player);
 
-    void spawnAt(BlockPos const& pos, SkinRecord const& record, SkinImage const& image, Player* source, int dimension, float yaw, bool reuseAny = false, bool persist = true);
+    void spawnAt(BlockPos const& pos, SkinRecord const& record, SkinImage const& image, Player* source, int dimension, float yaw, float visualXOffset = 0.0f, float visualYOffset = 0.0f, float visualZOffset = 0.0f, bool reuseAny = false, bool persist = true);
 
     void restoreAll(Player& player);
 
@@ -56,6 +58,9 @@ private:
         int64_t     anchorId   = -1;
         int64_t     anchorUniqueId = 0;
         float       yaw       = 180.0f;
+        float       xOffset   = 0.0f;
+        float       yOffset   = 0.0f;
+        float       zOffset   = 0.0f;
         int         dimension = 0;
     };
 
@@ -65,10 +70,13 @@ private:
     void onBlockChanged(BlockSource& source, BlockPos const& pos, Block const& previous, Block const& current);
     void onJoin(Player& player);
     void tick();
+    void cleanTabEntries();
+    void scheduleTabCleanup();
 
     void spawn(FakeSkull const& skull, SkinRecord const& record, SkinImage const& image, Player& source, Player const* target, bool refreshOnly = false);
     void remove(FakeSkull const& skull, Player const* target);
     void sendSkullTo(FakeSkull const& skull, SkinRecord const& record, SkinImage const& image, Player const* target);
+    void removeTabEntry(mce::UUID const& uuid);
 
     struct PlacedRecord {
         int         x         = 0;
@@ -77,12 +85,15 @@ private:
         int         dimension = 0;
         std::string ownerUuid;
         float       yaw = 0.0f;
+        float       xOffset = 0.0f;
+        float       yOffset = 0.0f;
+        float       zOffset = 0.0f;
         int64_t     anchorUniqueId = 0;
     };
 
     void loadPersistence();
     void savePersistence() const;
-    void remember(BlockPos const& pos, std::string const& ownerUuid, int dimension, float yaw, int64_t anchorUniqueId = 0);
+    void remember(BlockPos const& pos, std::string const& ownerUuid, int dimension, float yaw, float xOffset = 0.0f, float yOffset = 0.0f, float zOffset = 0.0f, int64_t anchorUniqueId = 0);
     void forget(BlockPos const& pos);
 
     SkinStore&                                                mStore;
@@ -95,9 +106,14 @@ private:
     std::vector<PlacedRecord>                                  mPersisted;
     bool                                                       mRestored = false;
     std::shared_ptr<std::atomic<bool>>                         mTickAlive;
+    std::shared_ptr<std::atomic<bool>>                         mTabAlive;
 };
 
 } // namespace custom_skull
+
+
+
+
 
 
 

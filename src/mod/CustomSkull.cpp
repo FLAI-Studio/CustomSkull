@@ -88,6 +88,7 @@ bool CustomSkull::enable() {
     }
     if (mEntities) {
         mEntities->registerEvents();
+        mEntities->startTabCleanup();
     }
     if (auto& bridge = HologramBridge::getInstance(); bridge.initialize()) {
         logger.info("HologramLib player-NPC bridge enabled");

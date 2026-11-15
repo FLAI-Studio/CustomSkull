@@ -4,6 +4,7 @@
 #include <chrono>
 #include <fstream>
 #include <format>
+#include <optional>
 #include <utility>
 
 #include <nlohmann/json.hpp>
@@ -18,15 +19,13 @@
 #include "ll/api/service/Bedrock.h"
 #include "ll/api/thread/ServerThreadExecutor.h"
 
+#include "mc/deps/core/string/HashedString.h"
 #include "mc/deps/core/math/Vec2.h"
 #include "mc/deps/core/math/Vec3.h"
 #include "mc/deps/core/platform/BuildPlatform.h"
 #include "mc/legacy/ActorRuntimeID.h"
 #include "mc/legacy/ActorUniqueID.h"
 #include "mc/network/packet/AddPlayerPacket.h"
-#include "mc/network/NetworkPeer.h"
-#include "mc/network/NetworkSystem.h"
-#include "mc/network/Compressibility.h"
 #include "mc/network/packet/NetworkChunkPublisherUpdatePacket.h"
 #include "mc/network/packet/PlayerListPacket.h"
 #include "mc/network/packet/PlayerListPacketPayload.h"
@@ -40,6 +39,7 @@
 #include "mc/deps/vanilla_components/ActorDataFlagComponent.h"
 #include "mc/server/ServerLevel.h"
 #include "mc/server/commands/ServerCommandOrigin.h"
+#include "mc/world/Direction.h"
 #include "mc/world/actor/Actor.h"
 #include "mc/world/actor/ActorFlags.h"
 #include "mc/world/actor/ActorType.h"
@@ -54,6 +54,7 @@
 #include "mc/server/NetworkChunkPublisher.h"
 #include "mc/world/level/GameType.h"
 #include "mc/world/level/block/Block.h"
+#include "mc/world/level/block/states/BuiltInBlockStates.h"
 #include "mc/world/level/block/actor/BlockActor.h"
 #include "mc/world/level/block/actor/BlockActorType.h"
 #include "mc/world/level/block/actor/SkullBlockActor.h"
@@ -80,6 +81,91 @@ float flipSkullYaw(float yaw) {
         yaw -= 360.0f;
     }
     return yaw;
+}
+
+struct WallSkullInfo {
+    float yaw;
+    float xOffset;
+    float yOffset;
+    float zOffset;
+};
+
+std::optional<WallSkullInfo> wallSkullInfo(BlockSource& source, BlockPos const& pos) {
+    auto& block = source.getBlock(pos);
+    auto& type  = block.getBlockType();
+    auto readState = [&](char const* name) {
+        return type.getState<int>(HashedString::computeHash(name), block.getData());
+    };
+
+    auto facingU = block.getState<uchar>(BuiltInBlockStates::FacingDirection());
+    auto facingI = block.getState<int>(BuiltInBlockStates::FacingDirection());
+    auto namedFacing = readState("facing_direction");
+    int  facing      = -1;
+    if (facingU) {
+        facing = *facingU;
+    } else if (facingI) {
+        facing = *facingI;
+    } else if (namedFacing) {
+        facing = *namedFacing;
+    }
+    switch (facing) {
+    case 2:
+        return WallSkullInfo{180.0f, 0.0f, 0.25f, 0.23f};
+    case 3:
+        return WallSkullInfo{0.0f, 0.0f, 0.25f, -0.23f};
+    case 4:
+        return WallSkullInfo{90.0f, 0.23f, 0.25f, 0.0f};
+    case 5:
+        return WallSkullInfo{270.0f, -0.23f, 0.25f, 0.0f};
+    default:
+        break;
+    }
+
+    auto cardinalU = block.getState<uchar>(BuiltInBlockStates::CardinalDirection());
+    auto cardinalE = block.getState<Direction::Type>(BuiltInBlockStates::CardinalDirection());
+    auto namedCardinal = readState("cardinal_direction");
+    int  cardinal  = -1;
+    if (cardinalU) {
+        cardinal = *cardinalU;
+    } else if (cardinalE) {
+        cardinal = static_cast<int>(*cardinalE);
+    } else if (namedCardinal) {
+        cardinal = *namedCardinal;
+    }
+    switch (cardinal) {
+    case 0:
+        return WallSkullInfo{0.0f, 0.0f, 0.25f, -0.23f};
+    case 1:
+        return WallSkullInfo{90.0f, 0.23f, 0.25f, 0.0f};
+    case 2:
+        return WallSkullInfo{180.0f, 0.0f, 0.25f, 0.23f};
+    case 3:
+        return WallSkullInfo{270.0f, -0.23f, 0.25f, 0.0f};
+    default:
+        break;
+    }
+
+    // Wall-mounted player heads store the attachment face in the block data
+    // nibble (2..5); floor heads use the entity rotation instead.
+    int data = block.getData();
+    if (data >= 2 && data <= 5) {
+        BlockPos below{pos.x, pos.y - 1, pos.z};
+        if (source.getBlock(below).getTypeName() == "minecraft:air") {
+            switch (data) {
+            case 2:
+                return WallSkullInfo{180.0f, 0.0f, 0.25f, 0.23f};
+            case 3:
+                return WallSkullInfo{0.0f, 0.0f, 0.25f, -0.23f};
+            case 4:
+                return WallSkullInfo{90.0f, 0.23f, 0.25f, 0.0f};
+            case 5:
+                return WallSkullInfo{270.0f, -0.23f, 0.25f, 0.0f};
+            default:
+                break;
+            }
+        }
+    }
+    return std::nullopt;
 }
 
 Key keyOf(BlockPos const& pos) {
@@ -165,7 +251,8 @@ std::string entityUuidFor(std::string const& ownerUuid) {
 }
 
 std::string fakeName(std::string const& uuid) {
-    return "Skull-" + uuid.substr(0, 8);
+    (void)uuid;
+    return "\xC2\xA7r";
 }
 
 } // namespace
@@ -202,6 +289,9 @@ void SkullEntityManager::registerEvents() {
 void SkullEntityManager::unregisterEvents() {
     if (mTickAlive) {
         *mTickAlive = false;
+    }
+    if (mTabAlive) {
+        *mTabAlive = false;
     }
     auto& bus = ll::event::EventBus::getInstance();
     for (auto& listener : mListeners) {
@@ -321,14 +411,59 @@ void SkullEntityManager::onPlaced(Player& player, BlockPos const& pos, Block con
             if (mPlaced.contains(keyOf(actualPos))) {
                 return;
             }
-            float spawnYaw = yaw;
+            float spawnYaw    = yaw;
+            float spawnXOffset = 0.0f;
+            float spawnOffset = 0.0f;
+            float spawnZOffset = 0.0f;
             if (source) {
-                if (auto* actor = source->getDimensionBlockSource().getBlockEntity(actualPos);
-                    actor && actor->getType() == BlockActorType::Skull) {
+                auto& region   = source->getDimensionBlockSource();
+                auto  wallInfo = wallSkullInfo(region, actualPos);
+                auto  facingState = region.getBlock(actualPos).getState<uchar>(BuiltInBlockStates::FacingDirection());
+                auto  cardinalState = region.getBlock(actualPos).getState<Direction::Type>(BuiltInBlockStates::CardinalDirection());
+                auto& blockNow = region.getBlock(actualPos);
+                auto namedFacing = blockNow.getBlockType().getState<int>(
+                    HashedString::computeHash("facing_direction"),
+                    blockNow.getData()
+                );
+                auto namedCardinal = blockNow.getBlockType().getState<int>(
+                    HashedString::computeHash("cardinal_direction"),
+                    blockNow.getData()
+                );
+                CustomSkull::getInstance().logger().info(
+                    "[skull] wall state facing={} cardinal={} namedFacing={} namedCardinal={} data={}",
+                    facingState ? static_cast<int>(*facingState) : -1,
+                    cardinalState ? static_cast<int>(*cardinalState) : -1,
+                    namedFacing.value_or(-1),
+                    namedCardinal.value_or(-1),
+                    blockNow.getData()
+                );
+                for (auto const& [stateName, stateId] : blockNow.getBlockType().mStateNameMap.get()) {
+                    auto value = blockNow.getBlockType().getState<int>(stateId, blockNow.getData());
+                    CustomSkull::getInstance().logger().info(
+                        "[skull] state {}={}",
+                        stateName.getString(),
+                        value.value_or(-999)
+                    );
+                }
+                if (wallInfo) {
+                    spawnYaw     = wallInfo->yaw;
+                    spawnXOffset = wallInfo->xOffset;
+                    spawnOffset  = wallInfo->yOffset;
+                    spawnZOffset = wallInfo->zOffset;
+                    CustomSkull::getInstance().logger().info(
+                        "[skull] wall skull facing={} yaw={} offset=({},{},{})",
+                        static_cast<int>(region.getBlock(actualPos).getState<uchar>(BuiltInBlockStates::FacingDirection()).value_or(0)),
+                        spawnYaw,
+                        spawnXOffset,
+                        spawnOffset,
+                        spawnZOffset
+                    );
+                } else if (auto* actor = region.getBlockEntity(actualPos);
+                           actor && actor->getType() == BlockActorType::Skull) {
                     spawnYaw = flipSkullYaw(static_cast<SkullBlockActor*>(actor)->mRotation);
                 }
             }
-            spawnAt(actualPos, recordCopy, imageCopy, source, dimension, spawnYaw);
+            spawnAt(actualPos, recordCopy, imageCopy, source, dimension, spawnYaw, spawnXOffset, spawnOffset, spawnZOffset);
         },
         std::chrono::milliseconds(50)
     );
@@ -355,15 +490,34 @@ void SkullEntityManager::onBlockChanged(BlockSource& source, BlockPos const& pos
     if (mPlaced.contains(keyOf(pos))) {
         auto placedIt = mPlaced.find(keyOf(pos));
         if (placedIt != mPlaced.end() && placedIt->second.hologramId >= 0) {
-            if (auto* actor = source.getBlockEntity(pos);
-                actor && actor->getType() == BlockActorType::Skull) {
-                float raw = static_cast<SkullBlockActor*>(actor)->mRotation;
-                float yaw = flipSkullYaw(raw);
-                if (auto& hologram = HologramBridge::getInstance(); hologram.available()) {
-                    hologram.setRotationLight(placedIt->second.hologramId, yaw);
-                }
-                CustomSkull::getInstance().logger().info("[skull] late rotation raw={} final={}", raw, yaw);
+            float yaw    = placedIt->second.yaw;
+            float xOff   = placedIt->second.xOffset;
+            float offset = placedIt->second.yOffset;
+            float zOff   = placedIt->second.zOffset;
+            if (auto wallInfo = wallSkullInfo(source, pos)) {
+                yaw    = wallInfo->yaw;
+                xOff   = wallInfo->xOffset;
+                offset = wallInfo->yOffset;
+                zOff   = wallInfo->zOffset;
+            } else if (auto* actor = source.getBlockEntity(pos);
+                       actor && actor->getType() == BlockActorType::Skull) {
+                yaw = flipSkullYaw(static_cast<SkullBlockActor*>(actor)->mRotation);
             }
+            placedIt->second.yaw     = yaw;
+            placedIt->second.xOffset = xOff;
+            placedIt->second.yOffset = offset;
+            placedIt->second.zOffset = zOff;
+            if (auto& hologram = HologramBridge::getInstance(); hologram.available()) {
+                hologram.setRotationLight(placedIt->second.hologramId, yaw);
+                hologram.setPositionLight(
+                    placedIt->second.hologramId,
+                    static_cast<float>(pos.x) + 0.5f + placedIt->second.xOffset,
+                    static_cast<float>(pos.y) - 0.01f + offset,
+                    static_cast<float>(pos.z) + 0.5f + placedIt->second.zOffset,
+                    placedIt->second.dimension
+                );
+            }
+            CustomSkull::getInstance().logger().info("[skull] late rotation yaw={} offset={}", yaw, offset);
         }
         return;
     }
@@ -382,10 +536,18 @@ void SkullEntityManager::onBlockChanged(BlockSource& source, BlockPos const& pos
         if (!image) {
             continue;
         }
-        auto* player = playerIt->second;
-        float yaw    = player->getRotation().y;
-        if (auto* actor = source.getBlockEntity(pos);
-            actor && actor->getType() == BlockActorType::Skull) {
+        auto* player       = playerIt->second;
+        float yaw          = player->getRotation().y;
+        float visualX     = 0.0f;
+        float visualOffset = 0.0f;
+        float visualZ     = 0.0f;
+        if (auto wallInfo = wallSkullInfo(source, pos)) {
+            yaw          = wallInfo->yaw;
+            visualX      = wallInfo->xOffset;
+            visualOffset = wallInfo->yOffset;
+            visualZ      = wallInfo->zOffset;
+        } else if (auto* actor = source.getBlockEntity(pos);
+                   actor && actor->getType() == BlockActorType::Skull) {
             yaw = flipSkullYaw(static_cast<SkullBlockActor*>(actor)->mRotation);
         }
         logger.info("[skull] block-changed fallback spawn owner={} pos={} yaw={}", it->second, pos.toString(), yaw);
@@ -403,7 +565,10 @@ void SkullEntityManager::onBlockChanged(BlockSource& source, BlockPos const& pos
             *image,
             player,
             static_cast<int>(source.getDimensionId()),
-            yaw
+            yaw,
+            visualX,
+            visualOffset,
+            visualZ
         );
         return;
     }
@@ -419,13 +584,21 @@ void SkullEntityManager::onBlockChanged(BlockSource& source, BlockPos const& pos
         if (!image) {
             continue;
         }
-        float yaw = 0.0f;
-        if (auto* actor = source.getBlockEntity(pos);
-            actor && actor->getType() == BlockActorType::Skull) {
+        float yaw          = 0.0f;
+        float visualX      = 0.0f;
+        float visualOffset = 0.0f;
+        float visualZ      = 0.0f;
+        if (auto wallInfo = wallSkullInfo(source, pos)) {
+            yaw          = wallInfo->yaw;
+            visualX      = wallInfo->xOffset;
+            visualOffset = wallInfo->yOffset;
+            visualZ      = wallInfo->zOffset;
+        } else if (auto* actor = source.getBlockEntity(pos);
+                   actor && actor->getType() == BlockActorType::Skull) {
             yaw = flipSkullYaw(static_cast<SkullBlockActor*>(actor)->mRotation);
         }
         logger.info("[skull] give-queue fallback spawn owner={} pos={} yaw={}", ownerUuid, pos.toString(), yaw);
-        spawnAt(pos, *record, *image, nullptr, static_cast<int>(source.getDimensionId()), yaw);
+        spawnAt(pos, *record, *image, nullptr, static_cast<int>(source.getDimensionId()), yaw, visualX, visualOffset, visualZ);
         return;
     }
 }
@@ -446,6 +619,74 @@ void SkullEntityManager::startTicking() {
         },
         std::chrono::seconds(1)
     );
+}
+
+void SkullEntityManager::startTabCleanup() {
+    if (mTabAlive) {
+        return;
+    }
+    mTabAlive = std::make_shared<std::atomic<bool>>(true);
+    scheduleTabCleanup();
+}
+
+void SkullEntityManager::scheduleTabCleanup() {
+    ll::thread::ServerThreadExecutor::getDefault().executeAfter(
+        [this, alive = mTabAlive]() {
+            if (!alive->load()) {
+                return;
+            }
+            cleanTabEntries();
+            if (alive->load()) {
+                scheduleTabCleanup();
+            }
+        },
+        std::chrono::seconds(1)
+    );
+}
+
+void SkullEntityManager::cleanTabEntries() {
+    if (!mTabAlive || !mTabAlive->load()) {
+        return;
+    }
+    std::vector<std::pair<std::string, mce::UUID>> entries;
+    auto add = [&](mce::UUID uuid) {
+        auto key = uuidToString(uuid);
+        for (auto const& [existing, _] : entries) {
+            if (existing == key) {
+                return;
+            }
+        }
+        entries.emplace_back(std::move(key), uuid);
+    };
+
+    for (auto const& [key, skull] : mPlaced) {
+        if (skull.hologramId >= 0) {
+            add(mce::UUID(0xF0B34E5043000000ULL, static_cast<uint64>(skull.hologramId)));
+        }
+        if (!skull.entityUuid.empty()) {
+            add(parseUuid(skull.entityUuid));
+        }
+    }
+    for (auto const& record : mStore.all()) {
+        add(parseUuid(entityUuidFor(record.uuid)));
+    }
+    for (uint64 i = 1; i <= 64; ++i) {
+        add(mce::UUID(0x534B554C4C000000ULL, i));
+        add(mce::UUID(0xF0B34E5043000000ULL, i));
+    }
+    if (entries.empty()) {
+        return;
+    }
+
+    for (auto const& [key, uuid] : entries) {
+        PlayerListPacket remove;
+        remove.setSerializationMode(SerializationMode::CerealOnly);
+        PlayerListPacketPayload::RemoveEntry entry;
+        entry.mAction = PlayerListPacketType::Remove;
+        entry.mUUID   = uuid;
+        remove.mEntries.get().emplace_back(std::move(entry));
+        remove.sendToClients();
+    }
 }
 
 void SkullEntityManager::tick() {
@@ -489,9 +730,9 @@ void SkullEntityManager::tick() {
                     continue;
                 }
                 Vec3 position{
-                    static_cast<float>(skull.x) + 0.5f,
+                    static_cast<float>(skull.x) + 0.5f + skull.xOffset,
                     static_cast<float>(skull.y),
-                    static_cast<float>(skull.z) + 0.5f
+                    static_cast<float>(skull.z) + 0.5f + skull.zOffset
                 };
                 if ((player.getPosition() - position).length() > 96.0f) {
                     continue;
@@ -548,6 +789,9 @@ void SkullEntityManager::loadPersistence() {
         record.dimension = item.value("dimension", 0);
         record.ownerUuid = item.value("owner", std::string{});
         record.yaw       = item.value("yaw", 0.0f);
+        record.xOffset   = item.value("xOffset", 0.0f);
+        record.yOffset   = item.value("yOffset", 0.0f);
+        record.zOffset   = item.value("zOffset", 0.0f);
         record.anchorUniqueId = item.value("anchor", static_cast<int64_t>(0));
         if (needsYawFix) {
             record.yaw = flipSkullYaw(record.yaw);
@@ -573,6 +817,9 @@ void SkullEntityManager::savePersistence() const {
         item["dimension"] = record.dimension;
         item["owner"]     = record.ownerUuid;
         item["yaw"]       = record.yaw;
+        item["xOffset"]   = record.xOffset;
+        item["yOffset"]   = record.yOffset;
+        item["zOffset"]   = record.zOffset;
         item["anchor"]    = record.anchorUniqueId;
         skulls.push_back(std::move(item));
     }
@@ -588,6 +835,9 @@ void SkullEntityManager::remember(
     std::string const& ownerUuid,
     int               dimension,
     float             yaw,
+    float             xOffset,
+    float             yOffset,
+    float             zOffset,
     int64_t           anchorUniqueId
 ) {
     for (auto& record : mPersisted) {
@@ -595,12 +845,15 @@ void SkullEntityManager::remember(
             record.dimension = dimension;
             record.ownerUuid = ownerUuid;
             record.yaw       = yaw;
+            record.xOffset   = xOffset;
+            record.yOffset   = yOffset;
+            record.zOffset   = zOffset;
             record.anchorUniqueId = anchorUniqueId;
             savePersistence();
             return;
         }
     }
-    mPersisted.push_back(PlacedRecord{pos.x, pos.y, pos.z, dimension, ownerUuid, yaw, anchorUniqueId});
+    mPersisted.push_back(PlacedRecord{pos.x, pos.y, pos.z, dimension, ownerUuid, yaw, xOffset, yOffset, zOffset, anchorUniqueId});
     savePersistence();
 }
 
@@ -652,7 +905,7 @@ void SkullEntityManager::restoreAll(Player& player) {
             placed.y,
             placed.z
         );
-        spawnAt(pos, *record, *image, &player, placed.dimension, placed.yaw, false, false);
+        spawnAt(pos, *record, *image, &player, placed.dimension, placed.yaw, placed.xOffset, placed.yOffset, placed.zOffset, false, false);
     }
 
     ll::thread::ServerThreadExecutor::getDefault().executeAfter(
@@ -667,9 +920,9 @@ void SkullEntityManager::restoreAll(Player& player) {
                 }
                 hologram.setPositionLight(
                     skull.hologramId,
-                    static_cast<float>(skull.x) + 0.5f,
-                    static_cast<float>(skull.y) - 0.01f,
-                    static_cast<float>(skull.z) + 0.5f,
+                    static_cast<float>(skull.x) + 0.5f + skull.xOffset,
+                    static_cast<float>(skull.y) - 0.01f + skull.yOffset,
+                    static_cast<float>(skull.z) + 0.5f + skull.zOffset,
                     skull.dimension
                 );
                 hologram.setRotationLight(skull.hologramId, skull.yaw);
@@ -693,6 +946,9 @@ void SkullEntityManager::spawnAt(
     Player*           source,
     int               dimension,
     float             yaw,
+    float             visualXOffset,
+    float             visualYOffset,
+    float             visualZOffset,
     bool              reuseAny,
     bool              persist
 ) {
@@ -707,6 +963,9 @@ void SkullEntityManager::spawnAt(
     skull.uniqueId   = uniqueIdFor(skull.entityUuid);
     skull.runtimeId  = static_cast<uint64_t>(skull.uniqueId);
     skull.yaw        = yaw;
+    skull.xOffset    = visualXOffset;
+    skull.yOffset    = visualYOffset;
+    skull.zOffset    = visualZOffset;
     skull.dimension  = dimension;
 
     auto& hologram = HologramBridge::getInstance();
@@ -759,7 +1018,7 @@ void SkullEntityManager::spawnAt(
                     skull.anchorUniqueId = uniqueId;
                     mPlaced.emplace(keyOf(pos), skull);
                     if (persist) {
-                        remember(pos, record.uuid, dimension, yaw, uniqueId);
+                        remember(pos, record.uuid, dimension, yaw, 0.0f, 0.0f, 0.0f, uniqueId);
                     }
                     CustomSkull::getInstance().logger().info(
                         "[skull] server anchor created uniqueId={} skin={}",
@@ -802,7 +1061,7 @@ void SkullEntityManager::spawnAt(
             old->second.yaw       = yaw;
             old->second.dimension = dimension;
             if (persist) {
-                remember(pos, record.uuid, dimension, yaw);
+                remember(pos, record.uuid, dimension, yaw, skull.xOffset, skull.yOffset, skull.zOffset);
             }
             logger.info("[skull] hologram skin updated id={} yaw={} skinOk={}", old->second.hologramId, yaw, skinOk);
             return;
@@ -814,9 +1073,9 @@ void SkullEntityManager::spawnAt(
         int64_t id = hologram.create(
             skinId,
             "\xC2\xA7r",
-            static_cast<float>(pos.x) + 0.5f,
-            static_cast<float>(pos.y) - 0.01f,
-            static_cast<float>(pos.z) + 0.5f,
+            static_cast<float>(pos.x) + 0.5f + visualXOffset,
+            static_cast<float>(pos.y) - 0.01f + visualYOffset,
+            static_cast<float>(pos.z) + 0.5f + visualZOffset,
             dimension,
             yaw,
             1.08f
@@ -825,11 +1084,16 @@ void SkullEntityManager::spawnAt(
             skull.hologramId = id;
             mPlaced.emplace(keyOf(pos), skull);
             if (persist) {
-                remember(pos, record.uuid, dimension, yaw);
+                remember(pos, record.uuid, dimension, yaw, skull.xOffset, skull.yOffset, skull.zOffset);
             }
             logger.info("[skull] hologram created id={} yaw={}", id, yaw);
+            auto tabUuid = mce::UUID(0xF0B34E5043000000ULL, static_cast<uint64>(id));
             ll::thread::ServerThreadExecutor::getDefault().executeAfter(
-                [this, id, pos, dimension]() {
+                [this, tabUuid]() { removeTabEntry(tabUuid); },
+                std::chrono::milliseconds(1000)
+            );
+            ll::thread::ServerThreadExecutor::getDefault().executeAfter(
+                [this, id, pos, dimension, visualXOffset, visualYOffset, visualZOffset]() {
                     auto& hologram = HologramBridge::getInstance();
                     float finalYaw = 0.0f;
                     if (auto placedIt = mPlaced.find(keyOf(pos)); placedIt != mPlaced.end()) {
@@ -837,9 +1101,9 @@ void SkullEntityManager::spawnAt(
                     }
                     hologram.setPositionLight(
                         id,
-                        static_cast<float>(pos.x) + 0.5f,
-                        static_cast<float>(pos.y) - 0.01f,
-                        static_cast<float>(pos.z) + 0.5f,
+                        static_cast<float>(pos.x) + 0.5f + visualXOffset,
+                        static_cast<float>(pos.y) - 0.01f + visualYOffset,
+                        static_cast<float>(pos.z) + 0.5f + visualZOffset,
                         dimension
                     );
                     hologram.setRotationLight(id, finalYaw);
@@ -857,35 +1121,49 @@ void SkullEntityManager::spawnAt(
             if (source) {
                 auto* player = source;
                 ll::thread::ServerThreadExecutor::getDefault().executeAfter(
-                    [this, player, pos, id, dimension, persist, ownerUuid = record.uuid]() {
+                    [this, player, pos, id, dimension, visualXOffset, visualYOffset, visualZOffset, persist, ownerUuid = record.uuid]() {
                         if (!player) {
                             return;
                         }
                         auto& hologram = HologramBridge::getInstance();
+                        float finalX = visualXOffset;
+                        float finalY = visualYOffset;
+                        float finalZ = visualZOffset;
+                        float finalYaw = 180.0f;
+                        auto& region = player->getDimensionBlockSource();
+                        if (auto wallInfo = wallSkullInfo(region, pos)) {
+                            finalYaw = wallInfo->yaw;
+                            finalX   = wallInfo->xOffset;
+                            finalY   = wallInfo->yOffset;
+                            finalZ   = wallInfo->zOffset;
+                        } else if (auto* actor = region.getBlockEntity(pos);
+                                   actor && actor->getType() == BlockActorType::Skull) {
+                            finalYaw = flipSkullYaw(static_cast<SkullBlockActor*>(actor)->mRotation);
+                        }
                         hologram.setPositionLight(
                             id,
-                            static_cast<float>(pos.x) + 0.5f,
-                            static_cast<float>(pos.y) - 0.01f,
-                            static_cast<float>(pos.z) + 0.5f,
+                            static_cast<float>(pos.x) + 0.5f + finalX,
+                            static_cast<float>(pos.y) - 0.01f + finalY,
+                            static_cast<float>(pos.z) + 0.5f + finalZ,
                             dimension
                         );
-                        if (auto* actor = player->getDimensionBlockSource().getBlockEntity(pos);
-                            actor && actor->getType() == BlockActorType::Skull) {
-                            float raw = static_cast<SkullBlockActor*>(actor)->mRotation;
-                            float yaw = flipSkullYaw(raw);
-                            hologram.setRotationLight(id, yaw);
-                            if (auto placedIt = mPlaced.find(keyOf(pos)); placedIt != mPlaced.end()) {
-                                placedIt->second.yaw = yaw;
-                            }
+                        hologram.setRotationLight(id, finalYaw);
+                        if (auto placedIt = mPlaced.find(keyOf(pos)); placedIt != mPlaced.end()) {
+                            placedIt->second.xOffset = finalX;
+                            placedIt->second.yOffset = finalY;
+                            placedIt->second.zOffset = finalZ;
+                            placedIt->second.yaw     = finalYaw;
                             if (persist) {
-                                remember(pos, ownerUuid, dimension, yaw);
+                                remember(pos, ownerUuid, dimension, finalYaw, finalX, finalY, finalZ);
                             }
-                            CustomSkull::getInstance().logger().info(
-                                "[skull] delayed rotation raw={} final={}",
-                                raw,
-                                yaw
-                            );
                         }
+                        CustomSkull::getInstance().logger().info(
+                            "[skull] delayed rotation yaw={} offset=({},{},{})",
+                            finalYaw,
+                            finalX,
+                            finalY,
+                            finalZ
+                        );
                     },
                     std::chrono::milliseconds(100)
                 );
@@ -905,7 +1183,7 @@ void SkullEntityManager::spawnAt(
     }
     mPlaced.emplace(keyOf(pos), skull);
     if (persist) {
-        remember(pos, record.uuid, dimension, yaw);
+        remember(pos, record.uuid, dimension, yaw, skull.xOffset, skull.yOffset, skull.zOffset);
     }
     spawn(skull, record, image, *source, nullptr);
 }
@@ -955,7 +1233,7 @@ void SkullEntityManager::spawn(
     packet.mName             = fakeName(skull.entityUuid);
     packet.mRuntimeId        = ActorRuntimeID(skull.runtimeId);
     packet.mPlatformOnlineId = "";
-    packet.mPos              = Vec3(static_cast<float>(skull.x) + 0.5f, static_cast<float>(skull.y) - 0.01f, static_cast<float>(skull.z) + 0.5f);
+    packet.mPos              = Vec3(static_cast<float>(skull.x) + 0.5f + skull.xOffset, static_cast<float>(skull.y) - 0.01f + skull.yOffset, static_cast<float>(skull.z) + 0.5f + skull.zOffset);
     packet.mVelocity         = Vec3(0.0f, 0.0f, 0.0f);
     packet.mRot              = Vec2(0.0f, skull.yaw);
     packet.mYHeadRot         = skull.yaw;
@@ -1012,6 +1290,11 @@ void SkullEntityManager::spawn(
                 skinPacket.sendToClients();
             }
         }
+        auto tabUuid = parseUuid(skull.entityUuid);
+        ll::thread::ServerThreadExecutor::getDefault().executeAfter(
+            [this, tabUuid]() { removeTabEntry(tabUuid); },
+            std::chrono::milliseconds(1000)
+        );
     }
 }
 
@@ -1040,6 +1323,16 @@ void SkullEntityManager::remove(FakeSkull const& skull, Player const* target) {
     } else {
         packet.sendToClients();
     }
+}
+
+void SkullEntityManager::removeTabEntry(mce::UUID const& uuid) {
+    PlayerListPacket remove;
+    remove.setSerializationMode(SerializationMode::CerealOnly);
+    PlayerListPacketPayload::RemoveEntry entry;
+    entry.mAction = PlayerListPacketType::Remove;
+    entry.mUUID   = uuid;
+    remove.mEntries.get().emplace_back(std::move(entry));
+    remove.sendToClients();
 }
 
 void SkullEntityManager::sendSkullTo(
@@ -1080,6 +1373,22 @@ void SkullEntityManager::sendSkullTo(
 }
 
 } // namespace custom_skull
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
