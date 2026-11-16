@@ -1,6 +1,6 @@
 {
     "format_version": 3,
-    "format_uuid": "7f9d2c74-3a51-4b2e-9f0d-1c6a8e4b2d13",
+    "format_uuid": "289f771f-2c9a-4d73-9f3f-8492495a924d",
     "tooth": "github.com/FLAI-Studio/CustomSkull",
     "version": "26.60.2",
     "info": {
@@ -36,5 +36,6 @@
         }
     ]
 }
+
 
 
