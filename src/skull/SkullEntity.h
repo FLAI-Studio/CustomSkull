@@ -55,9 +55,6 @@ private:
         std::vector<std::string> retiredEntityUuids;
         int64_t     uniqueId  = 0;
         uint64_t    runtimeId = 0;
-        int64_t     hologramId = -1;
-        int64_t     anchorId   = -1;
-        int64_t     anchorUniqueId = 0;
         float       yaw       = 180.0f;
         float       xOffset   = 0.0f;
         float       yOffset   = 0.0f;
@@ -68,6 +65,7 @@ private:
     void onInteract(Player& player, ItemStack& item);
     void onPlaced(Player& player, BlockPos const& pos, Block const& block);
     void onDestroy(BlockPos const& pos);
+    void onBreak(Player& player, BlockPos const& pos);
     void onBlockChanged(BlockSource& source, BlockPos const& pos, Block const& previous, Block const& current);
     void onJoin(Player& player);
     void tick();
@@ -89,12 +87,11 @@ private:
         float       xOffset = 0.0f;
         float       yOffset = 0.0f;
         float       zOffset = 0.0f;
-        int64_t     anchorUniqueId = 0;
     };
 
     void loadPersistence();
     void savePersistence() const;
-    void remember(BlockPos const& pos, std::string const& ownerUuid, int dimension, float yaw, float xOffset = 0.0f, float yOffset = 0.0f, float zOffset = 0.0f, int64_t anchorUniqueId = 0);
+    void remember(BlockPos const& pos, std::string const& ownerUuid, int dimension, float yaw, float xOffset = 0.0f, float yOffset = 0.0f, float zOffset = 0.0f);
     void forget(BlockPos const& pos);
 
     SkinStore&                                                mStore;

@@ -18,7 +18,7 @@ if not has_config("vs_runtime") then
 end
 
 target("CustomSkull")
-    local mod_version = "26.60.2"
+    local mod_version = "26.60.3"
     add_rules("@levibuildscript/linkrule")
     add_rules("@levibuildscript/modpacker", {modVersion = mod_version})
     local ll_major, ll_minor = LL_VERSION:match("(%d+)%.(%d+)")
@@ -49,8 +49,10 @@ target("CustomSkull")
     set_kind("shared")
     set_languages("c++20")
     set_symbols("debug")
-    add_includedirs("src", "third_party")
+    add_includedirs("src")
     add_files("src/**.cpp")
+
+
 
 
 
