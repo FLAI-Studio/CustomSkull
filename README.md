@@ -2,9 +2,9 @@
 
 为 **LeviLamina** 的 Minecraft 基岩版专用服务器提供自定义玩家头颅。
 
-可以把在线基岩版玩家的皮肤、Java 版账号皮肤或本地 PNG 制作成头颅物品，放置到世界里作为自定义玩家头。客户端不需要安装资源包。
+可以把在线基岩版玩家的皮肤、Java 版账号皮肤或本地 PNG 制作成头颅物品放置到世界里；客户端无需资源包
 
-> 当前版本核心功能可用，欢迎提交 PR 与 issue。
+> 当前版本核心功能可用，欢迎提交 issue/PR。
 
 ## 功能特性
 
@@ -15,9 +15,6 @@
 - `/skull reload`：重新加载 `skins.json`。
 - `/skull entity <名称>`：在脚下生成一个测试头颅实体。
 - `/skull blockinfo`：诊断命令，把附近头颅方块的坐标、旋转和 NBT 同时输出到聊天框和控制台。
-- 玩家进服时自动恢复已保存的头颅。
-- 已放置的头颅记录在 `placed_skulls.json`，服务器重启后自动恢复。
-- 玩家重载区块自动重建显示实体。
 
 ## 前置要求
 
@@ -40,7 +37,6 @@ mods/
 `-- CustomSkull/
     |-- CustomSkull.dll
     |-- manifest.json
-    |-- LICENSE
     `-- config/config.json
 ```
 
@@ -50,13 +46,13 @@ mods/
 
 | 命令 | 说明 |
 | --- | --- |
-| `/skull get <目标选择器> [数量]` | 用在线基岩版玩家的皮肤制作头颅，支持 `@s`、`@p`、`@a`。 |
+| `/skull get <目标选择器> [数量]` | 用在线基岩版玩家的皮肤制作头颅，支持目标选择器。 |
 | `/skull java <玩家> [数量]` | 用 Java 版账号皮肤制作头颅。 |
 | `/skull create <名称> [数量]` | 用 `skinData/<名称>.png` 制作头颅。 |
 | `/skull list` | 列出已保存的皮肤。 |
 | `/skull reload` | 重新加载皮肤索引。 |
 | `/skull entity <名称>` | 在脚下生成测试头颅实体。 |
-| `/skull blockinfo` | 输出附近头颅方块数据（聊天框 + 控制台）。 |
+| `/skull blockinfo` | 输出附近头颅方块数据。 |
 
 ## 配置
 
@@ -69,9 +65,7 @@ mods/
     "debug": false,
     "skullNameFormat": "\u00a7e{}\u7684\u5934\u9885",
     "maxEntriesPerPacket": 8,
-    "keepSkinListed": true,
-    "useHologramLib": false,
-    "useServerAnchor": false
+    "keepSkinListed": true
 }
 ```
 
@@ -82,15 +76,6 @@ mods/
 | `skullNameFormat` | "\u00a7e{}\u7684\u5934\u9885" | 头颅物品显示名，`{}` 会替换成玩家名。 |
 | `maxEntriesPerPacket` | 8 | 旧版皮肤广播的分包大小，当前显示路径不再使用。 |
 | `keepSkinListed` | true | 旧版皮肤广播配置，当前显示路径不再使用。 |
-| `useHologramLib` | false | 待移除：前版本强制使用内置显示方案。 |
-| `useServerAnchor` | false | 实验性：armor_stand 锚点，强制关闭。 |
-
-当前发布版在加载配置后会强制：
-
-```cpp
-useHologramLib  = false;
-useServerAnchor = false;
-```
 
 ## 数据文件
 
@@ -118,6 +103,7 @@ mods/CustomSkull/
 6. 玩家离开 512 格再回来时，使用新的 UUID 重新生成假玩家，避免客户端旧皮肤缓存导致 Steve。
 7. 服务器重启或玩家重新进服时，从 `placed_skulls.json` 恢复并重新下发完整皮肤。
 8. 假玩家生成 2 秒后发送 PlayerList Remove，清理玩家列表条目。
+9. 破坏头颅时取消原版掉落，移除方块并生成带 `SkullOwner` 的自定义头颅物品。
 
 头颅方块本身保留在世界中，用于放置、破坏和物品行为；假玩家只是客户端显示层。
 
@@ -134,24 +120,6 @@ Mojang rate limited, please wait a few minutes and retry
 ### Persona 皮肤
 
 Persona / 4D / 5D 皮肤无法转换为 64x64 头颅贴图。
-
-## 故障排查
-
-启动日志应出现：
-
-```text
-[CustomSkull] CustomSkull enabled
-```
-
-如果出现：
-
-```text
-HologramLib player-NPC bridge unavailable, using built-in fallback
-```
-
-这是正常现象，当前版本本来就不需要 HologramLib。
-
-放置头颅后可以执行 `/skull blockinfo`，聊天框和控制台都会输出方块坐标、rotation 和 NBT。
 
 ## 致谢
 
