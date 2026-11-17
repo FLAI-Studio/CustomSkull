@@ -11,8 +11,6 @@ struct Config {
     std::string skullNameFormat     = "\u00a7e{}\u7684\u5934\u9885";
     int         maxEntriesPerPacket = 8;
     bool        keepSkinListed      = true;
-    bool        useHologramLib      = true;
-    bool        useServerAnchor     = false;
 };
 
 } // namespace custom_skull

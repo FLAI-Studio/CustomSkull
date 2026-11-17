@@ -48,7 +48,7 @@ $pc = Get-Content (Join-Path $ll "lib\pkgconfig\levilamina.pc") -Raw
 $cflagsLine = ($pc -split "`n" | Where-Object { $_ -match "^Cflags:" }) -replace "^Cflags:\s*", ""
 $pkgIncludes = [regex]::Matches($cflagsLine, "-I(\S+)") | ForEach-Object { $_.Groups[1].Value }
 
-$includes = @((Join-Path $ll "include"), (Join-Path $root "src"), (Join-Path $root "third_party")) + $pkgIncludes
+$includes = @((Join-Path $ll "include"), (Join-Path $root "src")) + $pkgIncludes
 
 $compile = @(
     "/nologo", "/c", "/std:c++20", "/EHsc", "/utf-8", "/MD", "/O2", "/DNOMINMAX", "/DUNICODE",
@@ -102,13 +102,15 @@ if ($LASTEXITCODE -ne 0) { throw "link failed" }
 $package = Join-Path $root "bin\CustomSkull"
 New-Item -ItemType Directory -Force $package | Out-Null
 Copy-Item $outDll (Join-Path $package "CustomSkull.dll") -Force
-$manifest = (Get-Content (Join-Path $root "manifest.json") -Raw).Replace('${modVersion}', '26.60.2')
+$manifest = (Get-Content (Join-Path $root "manifest.json") -Raw).Replace('${modVersion}', '26.60.3')
 [IO.File]::WriteAllText(
     (Join-Path $package "manifest.json"),
     $manifest,
     (New-Object Text.UTF8Encoding($false))
 )
 Write-Host "built $package"
+
+
 
 
 

@@ -1,8 +1,8 @@
-{
+﻿{
     "format_version": 3,
     "format_uuid": "289f771f-2c9a-4d73-9f3f-8492495a924d",
     "tooth": "github.com/FLAI-Studio/CustomSkull",
-    "version": "26.60.2",
+    "version": "26.60.3",
     "info": {
         "name": "CustomSkull",
         "description": "Custom player skulls for your Bedrock server with LeviLamina.",
@@ -36,6 +36,7 @@
         }
     ]
 }
+
 
 
 

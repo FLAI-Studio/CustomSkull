@@ -1,4 +1,4 @@
-#include "mod/CustomSkull.h"
+﻿#include "mod/CustomSkull.h"
 
 #include <chrono>
 #include <filesystem>
@@ -10,9 +10,9 @@
 #include "ll/api/event/player/PlayerJoinEvent.h"
 #include "ll/api/io/LogLevel.h"
 #include "ll/api/mod/RegisterHelper.h"
+#include "ll/api/service/Bedrock.h"
 #include "ll/api/thread/ServerThreadExecutor.h"
 
-#include "hologram/HologramBridge.h"
 #include "skull/SkinBroadcast.h"
 #include "skull/SkullEntity.h"
 
@@ -43,8 +43,6 @@ bool CustomSkull::load() {
             logger.error("Cannot save config to {}", configPath.string());
         }
     }
-    mConfig.useServerAnchor = false;
-    mConfig.useHologramLib = false;
     mConfig.keepSkinListed = true;
     logger.setLevel(mConfig.debug ? ll::io::LogLevel::Debug : ll::io::LogLevel::Warn);
 
@@ -90,11 +88,6 @@ bool CustomSkull::enable() {
         mEntities->registerEvents();
         mEntities->startTabCleanup();
         mEntities->startTicking();
-    }
-    if (auto& bridge = HologramBridge::getInstance(); bridge.initialize()) {
-        logger.info("HologramLib player-NPC bridge enabled");
-    } else {
-        logger.warn("HologramLib player-NPC bridge unavailable, using built-in fallback: {}", bridge.lastError());
     }
 
     logger.info("CustomSkull enabled");
@@ -152,6 +145,58 @@ void CustomSkull::onPlayerJoin(Player& player) {
 }
 
 } // namespace custom_skull
+
+#include "skull/PlayerSkin.h"
+#include "skull/SkullItem.h"
+#include "mc/world/actor/player/Player.h"
+#include "mc/world/level/Level.h"
+#include "mc/world/level/Spawner.h"
+
+extern "C" __declspec(dllexport) bool customskull_give_skull_from_player(Player* victim, Player* receiver, int count) {
+    if (!victim || !receiver || count <= 0) {
+        return false;
+    }
+    auto image = custom_skull::imageFromPlayer(*victim);
+    if (!image) {
+        return false;
+    }
+    std::string error;
+    auto&       mod    = custom_skull::CustomSkull::getInstance();
+    auto        record = mod.store().upsert(victim->getRealName(), "bedrock", *image, error);
+    if (!error.empty()) {
+        return false;
+    }
+    auto display = custom_skull::formatSkullName(mod.config().skullNameFormat, record.name);
+    return custom_skull::giveSkull(*receiver, record, count, display);
+}
+
+extern "C" __declspec(dllexport) bool customskull_drop_skull_from_player(Player* victim, int count) {
+    if (!victim || count <= 0) {
+        return false;
+    }
+    auto image = custom_skull::imageFromPlayer(*victim);
+    if (!image) {
+        return false;
+    }
+    std::string error;
+    auto&       mod    = custom_skull::CustomSkull::getInstance();
+    auto        record = mod.store().upsert(victim->getRealName(), "bedrock", *image, error);
+    if (!error.empty()) {
+        return false;
+    }
+    auto stack = custom_skull::createSkullItem(
+        record,
+        count,
+        custom_skull::formatSkullName(mod.config().skullNameFormat, record.name)
+    );
+    auto level = ll::service::getLevel();
+    if (!level) {
+        return false;
+    }
+    auto& region = victim->getDimensionBlockSource();
+    level->getSpawner().spawnItem(region, stack, victim, victim->getPosition(), 0);
+    return true;
+}
 
 LL_REGISTER_MOD(custom_skull::CustomSkull, custom_skull::CustomSkull::getInstance())
 

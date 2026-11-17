@@ -1,4 +1,5 @@
 #include "skull/SkullEntity.h"
+#include "skull/SkullItem.h"
 
 #include <atomic>
 #include <chrono>
@@ -54,12 +55,13 @@
 #include "mc/server/NetworkChunkPublisher.h"
 #include "mc/world/level/GameType.h"
 #include "mc/world/level/block/Block.h"
+#include "mc/world/level/block/BlockChangeContext.h"
+#include "mc/world/level/Spawner.h"
 #include "mc/world/level/block/states/BuiltInBlockStates.h"
 #include "mc/world/level/block/actor/BlockActor.h"
 #include "mc/world/level/block/actor/BlockActorType.h"
 #include "mc/world/level/block/actor/SkullBlockActor.h"
 
-#include "hologram/HologramBridge.h"
 #include "mod/CustomSkull.h"
 #include "skull/SkinFactory.h"
 #include "skull/SkinStore.h"
@@ -169,74 +171,6 @@ Key keyOf(BlockPos const& pos) {
     return {pos.x, pos.y, pos.z};
 }
 
-Actor* spawnServerAnchor(Player& player, BlockPos const& pos, int dimension, float yOffset) {
-    auto level = ll::service::getLevel();
-    if (!level) {
-        return nullptr;
-    }
-    auto& serverLevel = static_cast<ServerLevel&>(*level);
-    auto  x           = static_cast<float>(pos.x) + 0.5f;
-    auto  y           = static_cast<float>(pos.y) - 0.01f + yOffset;
-    auto  z           = static_cast<float>(pos.z) + 0.5f;
-
-    auto& region = player.getDimensionBlockSource();
-    AABB  box{Vec3{x - 1.0f, y - 2.0f, z - 1.0f}, Vec3{x + 1.5f, y + 2.0f, z + 1.5f}};
-    auto  findNear = [&]() -> Actor* {
-        auto  actors   = region.getEntities(box, 4.0f, ActorType::ArmorStand, false);
-        CustomSkull::getInstance().logger().info("[skull] anchor candidates={}", actors.size());
-        Actor* best    = nullptr;
-        float  bestDist = 1e9f;
-        for (auto* actor : actors) {
-            if (!actor) {
-                continue;
-            }
-            auto dist = (actor->getPosition() - Vec3{x, y, z}).length();
-            if (dist < bestDist) {
-                bestDist = dist;
-                best     = actor;
-            }
-        }
-        return bestDist < 1.5f ? best : nullptr;
-    };
-
-    Actor* anchor = findNear();
-    if (!anchor) {
-        ServerCommandOrigin origin(
-            "CustomSkull",
-            serverLevel,
-            CommandPermissionLevel::GameDirectors,
-            static_cast<DimensionType>(dimension)
-        );
-        auto command = std::format("summon minecraft:armor_stand {} {} {}", x, y, z);
-        auto output  = ll::command::CommandRegistrar::getServerInstance().executeCommand(command, origin);
-        std::string message;
-        for (auto const& entry : output.mMessages) {
-            if (!message.empty()) {
-                message += "; ";
-            }
-            message += entry.mMessageId;
-        }
-        CustomSkull::getInstance().logger().info(
-            "[skull] summon '{}' success={} messages='{}'",
-            command,
-            output.mSuccessCount,
-            message
-        );
-        anchor = findNear();
-    }
-    if (!anchor) {
-        return nullptr;
-    }
-
-    if (auto flags = anchor->getEntityContext().tryGetComponent<ActorDataFlagComponent>()) {
-        flags->mValue.set(static_cast<size_t>(ActorFlags::HasGravity), false);
-        flags->mValue.set(static_cast<size_t>(ActorFlags::HasCollision), false);
-    }
-    anchor->setInvisible(false);
-    anchor->setPersistent();
-    return anchor;
-}
-
 int64_t uniqueIdFor(std::string const& uuid) {
     auto hash = static_cast<uint64_t>(std::hash<std::string>{}(uuid));
     return static_cast<int64_t>(hash & 0x7FFFFFFFFFFFFFFFULL);
@@ -274,7 +208,12 @@ void SkullEntityManager::registerEvents() {
         }
     ));
     mListeners.push_back(bus.emplaceListener<ll::event::PlayerDestroyBlockEvent>(
-        [this](ll::event::PlayerDestroyBlockEvent& event) { onDestroy(event.pos()); }
+        [this](ll::event::PlayerDestroyBlockEvent& event) {
+            if (mPlaced.contains(keyOf(event.pos()))) {
+                event.cancel();
+                onBreak(event.self(), event.pos());
+            }
+        }
     ));
     mListeners.push_back(bus.emplaceListener<ll::event::BlockChangedEvent>(
         [this](ll::event::BlockChangedEvent& event) {
@@ -476,6 +415,42 @@ void SkullEntityManager::onDestroy(BlockPos const& pos) {
     mPlaced.erase(it);
 }
 
+void SkullEntityManager::onBreak(Player& player, BlockPos const& pos) {
+    auto it = mPlaced.find(keyOf(pos));
+    if (it == mPlaced.end()) {
+        return;
+    }
+    auto* record = mStore.findByUuid(it->second.ownerUuid);
+    if (!record) {
+        onDestroy(pos);
+        return;
+    }
+    auto stack = createSkullItem(
+        *record,
+        1,
+        formatSkullName(CustomSkull::getInstance().config().skullNameFormat, record->name)
+    );
+    auto& region = player.getDimensionBlockSource();
+    region.removeBlock(pos, BlockChangeContext{});
+    if (mPlaced.contains(keyOf(pos))) {
+        onDestroy(pos);
+    }
+    auto level = ll::service::getLevel();
+    if (level) {
+        level->getSpawner().spawnItem(
+            region,
+            stack,
+            &player,
+            Vec3{
+                static_cast<float>(pos.x) + 0.5f,
+                static_cast<float>(pos.y) + 0.5f,
+                static_cast<float>(pos.z) + 0.5f
+            },
+            0
+        );
+    }
+}
+
 void SkullEntityManager::onBlockChanged(BlockSource& source, BlockPos const& pos, Block const& previous, Block const& current) {
     if (isSkullBlockName(previous.getTypeName()) && !isSkullBlockName(current.getTypeName())) {
         onDestroy(pos);
@@ -485,40 +460,8 @@ void SkullEntityManager::onBlockChanged(BlockSource& source, BlockPos const& pos
         return;
     }
     if (mPlaced.contains(keyOf(pos))) {
-        auto placedIt = mPlaced.find(keyOf(pos));
-        if (placedIt != mPlaced.end() && placedIt->second.hologramId >= 0) {
-            float yaw    = placedIt->second.yaw;
-            float xOff   = placedIt->second.xOffset;
-            float offset = placedIt->second.yOffset;
-            float zOff   = placedIt->second.zOffset;
-            if (auto wallInfo = wallSkullInfo(source, pos)) {
-                yaw    = wallInfo->yaw;
-                xOff   = wallInfo->xOffset;
-                offset = wallInfo->yOffset;
-                zOff   = wallInfo->zOffset;
-            } else if (auto* actor = source.getBlockEntity(pos);
-                       actor && actor->getType() == BlockActorType::Skull) {
-                yaw = flipSkullYaw(static_cast<SkullBlockActor*>(actor)->mRotation);
-            }
-            placedIt->second.yaw     = yaw;
-            placedIt->second.xOffset = xOff;
-            placedIt->second.yOffset = offset;
-            placedIt->second.zOffset = zOff;
-            if (auto& hologram = HologramBridge::getInstance(); hologram.available()) {
-                hologram.setRotationLight(placedIt->second.hologramId, yaw);
-                hologram.setPositionLight(
-                    placedIt->second.hologramId,
-                    static_cast<float>(pos.x) + 0.5f + placedIt->second.xOffset,
-                    static_cast<float>(pos.y) - 0.01f + offset,
-                    static_cast<float>(pos.z) + 0.5f + placedIt->second.zOffset,
-                    placedIt->second.dimension
-                );
-            }
-            CustomSkull::getInstance().logger().info("[skull] late rotation yaw={} offset={}", yaw, offset);
-        }
         return;
     }
-
     auto& logger = CustomSkull::getInstance().logger();
     for (auto it = mPendingOwner.begin(); it != mPendingOwner.end(); ++it) {
         auto playerIt = mPendingPlayer.find(it->first);
@@ -603,7 +546,7 @@ void SkullEntityManager::onBlockChanged(BlockSource& source, BlockPos const& pos
 void SkullEntityManager::sendAll(Player& player) { onJoin(player); }
 
 void SkullEntityManager::startTicking() {
-    if (mTickAlive || CustomSkull::getInstance().config().useHologramLib) {
+    if (mTickAlive) {
         return;
     }
     mTickAlive = std::make_shared<std::atomic<bool>>(true);
@@ -683,36 +626,7 @@ void SkullEntityManager::tick() {
     if (!level || !mTickAlive || !mTickAlive->load()) {
         return;
     }
-    if (CustomSkull::getInstance().config().useServerAnchor) {
-        auto& hologram = HologramBridge::getInstance();
-        if (hologram.available()) {
-            for (auto const& [key, skull] : mPlaced) {
-                if (skull.anchorUniqueId == 0) {
-                    continue;
-                }
-                auto* record = mStore.findByUuid(skull.ownerUuid);
-                if (!record) {
-                    continue;
-                }
-                auto image = mStore.image(*record);
-                if (!image) {
-                    continue;
-                }
-                std::string skinId = std::format(
-                    "customskull_anchor_{}_{}_{}_{}",
-                    record->uuid,
-                    skull.x,
-                    skull.y,
-                    skull.z
-                );
-                std::string file = record->file.empty() ? record->uuid + ".png" : record->file;
-                std::string png  = std::filesystem::absolute(mStore.imageDir() / file).string();
-                if (hologram.registerSkin(png, skinId, std::string(skullEntityGeometry()))) {
-                    hologram.overrideSkin(skull.anchorUniqueId, skinId, 0.0f);
-                }
-            }
-        }
-    } else {
+    {
         level->forEachPlayer([&](Player& player) {
             auto playerKey = uuidToString(player.getUuid());
             for (auto const& [key, skull] : mPlaced) {
@@ -812,7 +726,6 @@ void SkullEntityManager::loadPersistence() {
         record.xOffset   = item.value("xOffset", 0.0f);
         record.yOffset   = item.value("yOffset", 0.0f);
         record.zOffset   = item.value("zOffset", 0.0f);
-        record.anchorUniqueId = item.value("anchor", static_cast<int64_t>(0));
         if (needsYawFix) {
             record.yaw = flipSkullYaw(record.yaw);
         }
@@ -840,7 +753,6 @@ void SkullEntityManager::savePersistence() const {
         item["xOffset"]   = record.xOffset;
         item["yOffset"]   = record.yOffset;
         item["zOffset"]   = record.zOffset;
-        item["anchor"]    = record.anchorUniqueId;
         skulls.push_back(std::move(item));
     }
     document["skulls"] = std::move(skulls);
@@ -857,8 +769,7 @@ void SkullEntityManager::remember(
     float             yaw,
     float             xOffset,
     float             yOffset,
-    float             zOffset,
-    int64_t           anchorUniqueId
+    float             zOffset
 ) {
     for (auto& record : mPersisted) {
         if (record.x == pos.x && record.y == pos.y && record.z == pos.z) {
@@ -868,12 +779,11 @@ void SkullEntityManager::remember(
             record.xOffset   = xOffset;
             record.yOffset   = yOffset;
             record.zOffset   = zOffset;
-            record.anchorUniqueId = anchorUniqueId;
             savePersistence();
             return;
         }
     }
-    mPersisted.push_back(PlacedRecord{pos.x, pos.y, pos.z, dimension, ownerUuid, yaw, xOffset, yOffset, zOffset, anchorUniqueId});
+    mPersisted.push_back(PlacedRecord{pos.x, pos.y, pos.z, dimension, ownerUuid, yaw, xOffset, yOffset, zOffset});
     savePersistence();
 }
 
@@ -890,19 +800,6 @@ void SkullEntityManager::forget(BlockPos const& pos) {
 void SkullEntityManager::restoreAll(Player& player) {
     if (mRestored) {
         return;
-    }
-    auto& hologram = HologramBridge::getInstance();
-    if (CustomSkull::getInstance().config().useHologramLib) {
-        if (!hologram.available()) {
-            hologram.initialize();
-        }
-        if (!hologram.available()) {
-            CustomSkull::getInstance().logger().warn(
-                "[skull] cannot restore placed skulls: {}",
-                hologram.lastError()
-            );
-            return;
-        }
     }
     mRestored = true;
     for (auto const& placed : mPersisted) {
@@ -928,35 +825,6 @@ void SkullEntityManager::restoreAll(Player& player) {
         spawnAt(pos, *record, *image, &player, placed.dimension, placed.yaw, placed.xOffset, placed.yOffset, placed.zOffset, false, false);
     }
 
-    ll::thread::ServerThreadExecutor::getDefault().executeAfter(
-        [this]() {
-            auto& hologram = HologramBridge::getInstance();
-            if (!hologram.available()) {
-                return;
-            }
-            for (auto const& [key, skull] : mPlaced) {
-                if (skull.hologramId < 0) {
-                    continue;
-                }
-                hologram.setPositionLight(
-                    skull.hologramId,
-                    static_cast<float>(skull.x) + 0.5f + skull.xOffset,
-                    static_cast<float>(skull.y) - 0.01f + skull.yOffset,
-                    static_cast<float>(skull.z) + 0.5f + skull.zOffset,
-                    skull.dimension
-                );
-                hologram.setRotationLight(skull.hologramId, skull.yaw);
-                CustomSkull::getInstance().logger().info(
-                    "[skull] refreshed restored skull id={} pos=({},{},{})",
-                    skull.hologramId,
-                    skull.x,
-                    skull.y,
-                    skull.z
-                );
-            }
-        },
-        std::chrono::milliseconds(2000)
-    );
 }
 
 void SkullEntityManager::spawnAt(
@@ -988,211 +856,7 @@ void SkullEntityManager::spawnAt(
     skull.zOffset    = visualZOffset;
     skull.dimension  = dimension;
 
-    auto& hologram = HologramBridge::getInstance();
-    if (!hologram.available()) {
-        hologram.initialize();
-    }
-    if (!hologram.available()) {
-        CustomSkull::getInstance().logger().warn("[skull] Hologram unavailable: {}", hologram.lastError());
-    }
-    if (reuseAny && hologram.available()) {
-        for (auto it = mPlaced.begin(); it != mPlaced.end(); ++it) {
-            if (it->second.ownerUuid != record.uuid || it->second.hologramId < 0) {
-                continue;
-            }
-            CustomSkull::getInstance().logger().info(
-                "[skull] hologram reused unchanged id={} (no respawn)",
-                it->second.hologramId
-            );
-            return;
-        }
-    }
     auto old = mPlaced.find(keyOf(pos));
-    if (CustomSkull::getInstance().config().useServerAnchor && hologram.available() && source) {
-        static std::atomic<uint64_t> anchorCounter{1};
-        auto const                   token  = anchorCounter.fetch_add(1);
-        std::string                  skinId = "customskull_" + record.uuid + "_anchor_" + std::to_string(token);
-        std::string                  file   = record.file.empty() ? record.uuid + ".png" : record.file;
-        std::string                  png    = std::filesystem::absolute(mStore.imageDir() / file).string();
-        bool skinOk = hologram.registerSkin(png, skinId, std::string(skullEntityGeometry()));
-        CustomSkull::getInstance().logger().info("[skull] anchor skin registered={} skin={}", skinOk, skinId);
-        if (skinOk) {
-            if (auto* anchor = spawnServerAnchor(
-                    *source,
-                    pos,
-                    dimension,
-                    0.0f
-                )) {
-                auto uniqueId = static_cast<int64_t>(anchor->getOrCreateUniqueID().rawID);
-                bool overridden = hologram.overrideSkin(uniqueId, skinId, 0.0f);
-                CustomSkull::getInstance().logger().info(
-                    "[skull] anchor uniqueId={} override={}",
-                    uniqueId,
-                    overridden
-                );
-                if (overridden) {
-                    if (old != mPlaced.end()) {
-                        remove(old->second, nullptr);
-                        mPlaced.erase(old);
-                    }
-                    skull.anchorUniqueId = uniqueId;
-                    mPlaced.emplace(keyOf(pos), skull);
-                    if (persist) {
-                        remember(pos, record.uuid, dimension, yaw, 0.0f, 0.0f, 0.0f, uniqueId);
-                    }
-                    CustomSkull::getInstance().logger().info(
-                        "[skull] server anchor created uniqueId={} skin={}",
-                        uniqueId,
-                        skinId
-                    );
-                    return;
-                }
-                anchor->remove();
-            }
-        }
-        CustomSkull::getInstance().logger().warn("[skull] server anchor failed, falling back");
-        if (CustomSkull::getInstance().config().useServerAnchor) {
-            return;
-        }
-    }
-
-    if (CustomSkull::getInstance().config().useHologramLib && hologram.available()) {
-        static std::atomic<uint64_t> skinCounter{1};
-        auto const                   token   = skinCounter.fetch_add(1);
-        std::string                  skinId  = "customskull_" + record.uuid + "_" + std::to_string(token);
-        std::string                  file    = record.file.empty() ? record.uuid + ".png" : record.file;
-        std::string                  png     = std::filesystem::absolute(mStore.imageDir() / file).string();
-        bool                         skinOk  = hologram.registerSkin(png, skinId, std::string(skullEntityGeometry()));
-        auto&                        logger  = CustomSkull::getInstance().logger();
-        logger.info(
-            "[skull] hologram spawn pos=({},{},{}) skin={} registered={}",
-            pos.x,
-            pos.y,
-            pos.z,
-            skinId,
-            skinOk
-        );
-        if (old != mPlaced.end() && old->second.hologramId >= 0) {
-            if (skinOk && old->second.ownerUuid != record.uuid) {
-                hologram.setSkin(old->second.hologramId, skinId);
-            }
-            hologram.setRotation(old->second.hologramId, yaw);
-            old->second.ownerUuid = record.uuid;
-            old->second.yaw       = yaw;
-            old->second.dimension = dimension;
-            if (persist) {
-                remember(pos, record.uuid, dimension, yaw, skull.xOffset, skull.yOffset, skull.zOffset);
-            }
-            logger.info("[skull] hologram skin updated id={} yaw={} skinOk={}", old->second.hologramId, yaw, skinOk);
-            return;
-        }
-        if (old != mPlaced.end()) {
-            remove(old->second, nullptr);
-            mPlaced.erase(old);
-        }
-        int64_t id = hologram.create(
-            skinId,
-            "\xC2\xA7r",
-            static_cast<float>(pos.x) + 0.5f + visualXOffset,
-            static_cast<float>(pos.y) - 0.01f + visualYOffset,
-            static_cast<float>(pos.z) + 0.5f + visualZOffset,
-            dimension,
-            yaw,
-            1.08f
-        );
-        if (id >= 0) {
-            skull.hologramId = id;
-            mPlaced.emplace(keyOf(pos), skull);
-            if (persist) {
-                remember(pos, record.uuid, dimension, yaw, skull.xOffset, skull.yOffset, skull.zOffset);
-            }
-            logger.info("[skull] hologram created id={} yaw={}", id, yaw);
-            auto tabUuid = mce::UUID(0xF0B34E5043000000ULL, static_cast<uint64>(id));
-            ll::thread::ServerThreadExecutor::getDefault().executeAfter(
-                [this, tabUuid]() { removeTabEntry(tabUuid); },
-                std::chrono::milliseconds(1000)
-            );
-            ll::thread::ServerThreadExecutor::getDefault().executeAfter(
-                [this, id, pos, dimension, visualXOffset, visualYOffset, visualZOffset]() {
-                    auto& hologram = HologramBridge::getInstance();
-                    float finalYaw = 0.0f;
-                    if (auto placedIt = mPlaced.find(keyOf(pos)); placedIt != mPlaced.end()) {
-                        finalYaw = placedIt->second.yaw;
-                    }
-                    hologram.setPositionLight(
-                        id,
-                        static_cast<float>(pos.x) + 0.5f + visualXOffset,
-                        static_cast<float>(pos.y) - 0.01f + visualYOffset,
-                        static_cast<float>(pos.z) + 0.5f + visualZOffset,
-                        dimension
-                    );
-                    hologram.setRotationLight(id, finalYaw);
-                    CustomSkull::getInstance().logger().info(
-                        "[skull] delayed light id={} pos=({},{},{}) yaw={}",
-                        id,
-                        pos.x,
-                        pos.y,
-                        pos.z,
-                        finalYaw
-                    );
-                },
-                std::chrono::milliseconds(1000)
-            );
-            if (source) {
-                auto* player = source;
-                ll::thread::ServerThreadExecutor::getDefault().executeAfter(
-                    [this, player, pos, id, dimension, visualXOffset, visualYOffset, visualZOffset, persist, ownerUuid = record.uuid]() {
-                        if (!player) {
-                            return;
-                        }
-                        auto& hologram = HologramBridge::getInstance();
-                        float finalX = visualXOffset;
-                        float finalY = visualYOffset;
-                        float finalZ = visualZOffset;
-                        float finalYaw = 180.0f;
-                        auto& region = player->getDimensionBlockSource();
-                        if (auto wallInfo = wallSkullInfo(region, pos)) {
-                            finalYaw = wallInfo->yaw;
-                            finalX   = wallInfo->xOffset;
-                            finalY   = wallInfo->yOffset;
-                            finalZ   = wallInfo->zOffset;
-                        } else if (auto* actor = region.getBlockEntity(pos);
-                                   actor && actor->getType() == BlockActorType::Skull) {
-                            finalYaw = flipSkullYaw(static_cast<SkullBlockActor*>(actor)->mRotation);
-                        }
-                        hologram.setPositionLight(
-                            id,
-                            static_cast<float>(pos.x) + 0.5f + finalX,
-                            static_cast<float>(pos.y) - 0.01f + finalY,
-                            static_cast<float>(pos.z) + 0.5f + finalZ,
-                            dimension
-                        );
-                        hologram.setRotationLight(id, finalYaw);
-                        if (auto placedIt = mPlaced.find(keyOf(pos)); placedIt != mPlaced.end()) {
-                            placedIt->second.xOffset = finalX;
-                            placedIt->second.yOffset = finalY;
-                            placedIt->second.zOffset = finalZ;
-                            placedIt->second.yaw     = finalYaw;
-                            if (persist) {
-                                remember(pos, ownerUuid, dimension, finalYaw, finalX, finalY, finalZ);
-                            }
-                        }
-                        CustomSkull::getInstance().logger().info(
-                            "[skull] delayed rotation yaw={} offset=({},{},{})",
-                            finalYaw,
-                            finalX,
-                            finalY,
-                            finalZ
-                        );
-                    },
-                    std::chrono::milliseconds(100)
-                );
-            }
-            return;
-        }
-        logger.warn("[skull] HologramLib create failed, falling back to built-in entity");
-    }
-
     if (old != mPlaced.end()) {
         remove(old->second, nullptr);
         mPlaced.erase(old);
@@ -1223,9 +887,6 @@ void SkullEntityManager::onJoin(Player& player) {
         }
     }
     for (auto const& [key, skull] : mPlaced) {
-        if (skull.hologramId >= 0) {
-            continue;
-        }
         auto* record = mStore.findByUuid(skull.ownerUuid);
         if (!record) {
             continue;
@@ -1319,22 +980,6 @@ void SkullEntityManager::spawn(
 }
 
 void SkullEntityManager::remove(FakeSkull const& skull, Player const* target) {
-    if (skull.anchorUniqueId != 0) {
-        HologramBridge::getInstance().clearOverride(skull.anchorUniqueId);
-        if (auto level = ll::service::getLevel()) {
-            if (auto* actor = level->fetchEntity(ActorUniqueID{skull.anchorUniqueId}, false)) {
-                actor->remove();
-            }
-        }
-        return;
-    }
-    if (skull.hologramId >= 0) {
-        HologramBridge::getInstance().destroy(skull.hologramId);
-        if (skull.anchorId >= 0) {
-            HologramBridge::getInstance().destroyAnchor(skull.anchorId);
-        }
-        return;
-    }
     auto removeOne = [&](std::string const& uuid) {
         if (uuid.empty()) {
             return;
@@ -1403,6 +1048,7 @@ void SkullEntityManager::sendSkullTo(
 }
 
 } // namespace custom_skull
+
 
 
 
